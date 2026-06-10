@@ -207,17 +207,17 @@
 (defun c:OC () (command "._OFFSET" "_Layer" "_Current") (princ))
 
 ; F:元のレイヤでオフセットFC:オフセットしたものを現在のレイヤに
-(defun c:FC ()
-  (setvar "OFFSETLAYERMODE" 1)
-  (command "OFFSET")
-  (princ)
-)
+;(defun c:FC ()
+;  (setvar "OFFSETLAYERMODE" 1)
+;  (command "OFFSET")
+;  (princ)
+;)
 
-(defun c:F ()
-  (setvar "OFFSETLAYERMODE" 0)
-  (command "OFFSET")
-  (princ)
-)
+;(defun c:F ()
+;  (setvar "OFFSETLAYERMODE" 0)
+;  (command "OFFSET")
+;  (princ)
+;)
 
 ; -------------------------------------------------------------------------
 ; Z系 - 補助線（HJ画層）管理
