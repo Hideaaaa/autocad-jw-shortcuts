@@ -286,6 +286,392 @@
   (princ)
 )
 
+;; test============================================================
+;; PARTIAL-OFFSET.LSP
+;; 
+;; ポリラインの一部セグメントを選択してオフセットするコマンドのテスト
+;; ============================================================
+;;
+;; コマンド:
+;;   POFFSET  - オフセット結果を元のレイヤに作成
+;;   POFFSETC - オフセット結果をカレントレイヤに作成
+;;
+;; 使い方:
+;;   1. コマンド実行
+;;   2. オフセット距離を入力
+;;   3. セグメントをクリック（最初のクリックでポリライン自動特定）、Enterで確定
+;;   4. オフセット方向を点で指示
+;;   5. 繋がったセグメントはポリライン、バラバラはLINEで生成
+;; ============================================================
+
+
+;;------------------------------------------------------------
+;; メイン処理（use-current-layer: T=カレント / nil=元レイヤ）
+;;------------------------------------------------------------
+(defun poffset-main (use-current-layer / pl-ent pl-data vlist n
+                      dist side-pt side segs sel-segs
+                      result-groups grp new-ent lay)
+
+  ;; --- 1. オフセット距離 ---
+  (setq dist (getdist "\nオフセット距離を入力: "))
+  (if (null dist) (exit))
+
+  ;; --- 2. セグメント選択（最初のクリックでポリライン自動特定）---
+  (princ "\nセグメントをクリック [Enter で確定]: ")
+  (setq sel-result (poffset-select-segments-auto))
+  (if (null sel-result) (progn (princ "\nキャンセル") (exit)))
+
+  (setq pl-ent   (car sel-result))
+  (setq sel-segs (cadr sel-result))
+
+  (setq pl-data (entget pl-ent))
+  (setq vlist (poffset-get-vertices pl-ent))
+  (setq n (length vlist))
+  (if (< n 2) (progn (princ "\n頂点が不足しています") (exit)))
+
+  ;; --- 3. オフセット方向 ---
+  (setq side-pt (getpoint "\nオフセット方向を点で指示: "))
+  (if (null side-pt) (exit))
+
+  ;; --- 4. 方向判定 ---
+  (setq side (poffset-side-sign vlist side-pt))
+
+  ;; --- 5. 選択セグメントをオフセット計算 ---
+  (setq segs (poffset-calc-offset-segs vlist sel-segs dist side))
+
+  ;; --- 6. 連続グループに分割 ---
+  (setq result-groups (poffset-group-consecutive sel-segs segs))
+
+  ;; --- 7. 元レイヤ取得 ---
+  (setq lay (cdr (assoc 8 pl-data)))
+
+  ;; --- 8. 図形生成 ---
+  (foreach grp result-groups
+    (if use-current-layer
+      (poffset-draw-group grp nil)       ; カレントレイヤ
+      (poffset-draw-group grp lay)       ; 元のレイヤ
+    )
+  )
+
+  (princ (strcat "\n完了: " (itoa (length result-groups)) " グループ生成"))
+  (princ)
+)
+
+
+;;------------------------------------------------------------
+;; 頂点リスト取得（LWPOLYLINE対応）
+;;------------------------------------------------------------
+(defun poffset-get-vertices (ent / data pt-list pair)
+  (setq data (entget ent))
+  (setq pt-list '())
+  (foreach pair data
+    (if (= (car pair) 10)
+      (setq pt-list (append pt-list (list (cdr pair))))
+    )
+  )
+  pt-list
+)
+
+
+;;------------------------------------------------------------
+;; セグメント選択（最初のクリックでポリライン自動特定）
+;; 戻り値: (pl-ent sel-idx-list) または nil
+;;------------------------------------------------------------
+(defun poffset-select-segments-auto (/ sel-idx pl-ent vlist inp idx result)
+  (setq sel-idx '())
+  (setq pl-ent nil)
+  (setq vlist nil)
+
+  (while
+    (progn
+      (setq inp (grread T 15 0))
+      (not (and (= (car inp) 2) (= (cadr inp) 13)))  ; Enter で終了
+    )
+
+    (cond
+      ((= (car inp) 5) nil)  ; マウス移動は無視
+
+      ((= (car inp) 3)  ; 左クリック
+       (if (null pl-ent)
+         ;; --- 最初のクリック：ポリラインを自動特定 ---
+         (progn
+           (setq result (poffset-find-polyline-at (cadr inp)))
+           (if result
+             (progn
+               (setq pl-ent (car result))
+               (setq vlist  (cadr result))
+               (setq idx    (caddr result))
+               (setq sel-idx (list idx))
+               (princ (strcat "\nポリライン特定、セグメント " (itoa (1+ idx)) " 選択"))
+             )
+             (princ "\nポリラインが見つかりません")
+           )
+         )
+         ;; --- 2回目以降：同じポリラインのセグメントを追加 ---
+         (progn
+           (setq idx (poffset-nearest-seg (cadr inp) vlist))
+           (if (not (member idx sel-idx))
+             (progn
+               (setq sel-idx (append sel-idx (list idx)))
+               (princ (strcat "\nセグメント " (itoa (1+ idx)) " 選択"))
+             )
+           )
+         )
+       )
+      )
+    )
+  )
+
+  (if (and pl-ent sel-idx)
+    (list pl-ent sel-idx)
+    nil
+  )
+)
+
+
+;;------------------------------------------------------------
+;; クリック点付近のポリラインとセグメントを特定
+;; 戻り値: (pl-ent vlist nearest-seg-idx) または nil
+;;------------------------------------------------------------
+(defun poffset-find-polyline-at (pt / snap-dist ss i ent data etype vlist idx best-ent best-vlist best-idx best-d d)
+  (setq snap-dist (/ (getvar "VIEWSIZE") 50.0))  ; 画面サイズの2%を許容距離に
+  (setq ss (ssget "_C"
+             (list (- (car pt) snap-dist) (- (cadr pt) snap-dist) 0.0)
+             (list (+ (car pt) snap-dist) (+ (cadr pt) snap-dist) 0.0)))
+  (if (null ss) (setq ss (ssget "_C"
+             (list (- (car pt) (* snap-dist 3)) (- (cadr pt) (* snap-dist 3)) 0.0)
+             (list (+ (car pt) (* snap-dist 3)) (+ (cadr pt) (* snap-dist 3)) 0.0))))
+  (if (null ss) (return nil))
+
+  (setq best-ent nil best-d 1e38)
+  (setq i 0)
+  (repeat (sslength ss)
+    (setq ent (ssname ss i))
+    (setq data (entget ent))
+    (setq etype (cdr (assoc 0 data)))
+    (if (member etype '("LWPOLYLINE" "POLYLINE"))
+      (progn
+        (setq vlist (poffset-get-vertices ent))
+        (setq idx (poffset-nearest-seg pt vlist))
+        (setq d (distance pt (poffset-foot-on-seg pt (nth idx vlist) (nth (1+ idx) vlist))))
+        (if (< d best-d)
+          (progn
+            (setq best-d d)
+            (setq best-ent ent)
+            (setq best-vlist vlist)
+            (setq best-idx idx)
+          )
+        )
+      )
+    )
+    (setq i (1+ i))
+  )
+
+  (if best-ent
+    (list best-ent best-vlist best-idx)
+    nil
+  )
+)
+
+
+;;------------------------------------------------------------
+;; クリック点に最も近いセグメントのインデックスを返す
+;;------------------------------------------------------------
+(defun poffset-nearest-seg (pt vlist / i n best-i best-d d p1 p2 foot)
+  (setq n (1- (length vlist)))
+  (setq i 0 best-i 0 best-d 1e38)
+  (repeat n
+    (setq p1 (nth i vlist))
+    (setq p2 (nth (1+ i) vlist))
+    (setq foot (poffset-foot-on-seg pt p1 p2))
+    (setq d (distance pt foot))
+    (if (< d best-d)
+      (progn (setq best-d d) (setq best-i i))
+    )
+    (setq i (1+ i))
+  )
+  best-i
+)
+
+
+;;------------------------------------------------------------
+;; 線分上の垂足を求める
+;;------------------------------------------------------------
+(defun poffset-foot-on-seg (pt p1 p2 / dx dy t-val len2 tx ty)
+  (setq dx (- (car p2) (car p1)))
+  (setq dy (- (cadr p2) (cadr p1)))
+  (setq len2 (+ (* dx dx) (* dy dy)))
+  (if (< len2 1e-10)
+    p1
+    (progn
+      (setq t-val (/ (+ (* (- (car pt) (car p1)) dx)
+                        (* (- (cadr pt) (cadr p1)) dy))
+                     len2))
+      (setq t-val (max 0.0 (min 1.0 t-val)))
+      (list (+ (car p1) (* t-val dx))
+            (+ (cadr p1) (* t-val dy))
+            0.0)
+    )
+  )
+)
+
+
+;;------------------------------------------------------------
+;; オフセット方向符号（+1 or -1）
+;;------------------------------------------------------------
+(defun poffset-side-sign (vlist side-pt / p1 p2 dx dy nx ny cx cy dot)
+  ;; 最初のセグメントの法線方向と side-pt の関係で判定
+  (setq p1 (nth 0 vlist))
+  (setq p2 (nth 1 vlist))
+  (setq dx (- (car p2) (car p1)))
+  (setq dy (- (cadr p2) (cadr p1)))
+  ;; 左法線
+  (setq nx (- dy))
+  (setq ny dx)
+  ;; セグメント中点
+  (setq cx (* 0.5 (+ (car p1) (car p2))))
+  (setq cy (* 0.5 (+ (cadr p1) (cadr p2))))
+  ;; side-pt との内積
+  (setq dot (+ (* (- (car side-pt) cx) nx)
+               (* (- (cadr side-pt) cy) ny)))
+  (if (>= dot 0) 1.0 -1.0)
+)
+
+
+;;------------------------------------------------------------
+;; 選択セグメントのオフセット線分リストを計算
+;; 戻り値: ((p1 p2) (p1 p2) ...) インデックス対応
+;;------------------------------------------------------------
+(defun poffset-calc-offset-segs (vlist sel-segs dist side /
+                                   result idx p1 p2 dx dy len nx ny op1 op2)
+  (setq result '())
+  (foreach idx sel-segs
+    (setq p1 (nth idx vlist))
+    (setq p2 (nth (1+ idx) vlist))
+    (setq dx (- (car p2) (car p1)))
+    (setq dy (- (cadr p2) (cadr p1)))
+    (setq len (sqrt (+ (* dx dx) (* dy dy))))
+    (if (> len 1e-10)
+      (progn
+        ;; 左法線を正規化してdist*side倍
+        (setq nx (* (/ (- dy) len) dist side))
+        (setq ny (* (/ dx len) dist side))
+        (setq op1 (list (+ (car p1) nx) (+ (cadr p1) ny) 0.0))
+        (setq op2 (list (+ (car p2) nx) (+ (cadr p2) ny) 0.0))
+        (setq result (append result (list (list idx op1 op2))))
+      )
+    )
+  )
+  result
+)
+
+
+;;------------------------------------------------------------
+;; 連続するセグメントをグループ化
+;; 戻り値: グループのリスト、各グループは ((idx op1 op2) ...) の形
+;;------------------------------------------------------------
+(defun poffset-group-consecutive (sel-segs segs / sorted groups grp prev-idx item idx)
+  (setq sorted (vl-sort segs '(lambda (a b) (< (car a) (car b)))))
+  (setq groups '())
+  (setq grp '())
+  (setq prev-idx -999)
+
+  (foreach item sorted
+    (setq idx (car item))
+    (if (or (null grp) (= idx (1+ prev-idx)))
+      ;; 連続 → 同じグループに追加
+      (setq grp (append grp (list item)))
+      ;; 不連続 → グループ確定して新グループ開始
+      (progn
+        (setq groups (append groups (list grp)))
+        (setq grp (list item))
+      )
+    )
+    (setq prev-idx idx)
+  )
+  (if grp (setq groups (append groups (list grp))))
+  groups
+)
+
+
+;;------------------------------------------------------------
+;; グループを図形として描画
+;; lay=nil のときカレントレイヤ、文字列のとき指定レイヤ
+;;------------------------------------------------------------
+(defun poffset-draw-group (grp lay / pts item op1 op2 prev-p2 connected)
+  (setq pts '())
+  (setq prev-p2 nil)
+  (setq connected T)
+
+  ;; 頂点をつなげられるか確認しながらリスト化
+  (foreach item grp
+    (setq op1 (cadr item))
+    (setq op2 (caddr item))
+    (if (null pts)
+      (setq pts (list op1 op2))
+      (progn
+        ;; 前のセグメントの終点と今のセグメントの始点が近ければ連続
+        (if (< (distance (last pts) op1) 1e-6)
+          (setq pts (append pts (list op2)))
+          (progn
+            ;; 離れている → 連続とみなさずフラグを折る
+            (setq connected nil)
+            (setq pts (append pts (list op2)))
+          )
+        )
+      )
+    )
+  )
+
+  ;; レイヤ変更が必要な場合
+  (if lay
+    (progn
+      (setq *prev-lay* (getvar "CLAYER"))
+      (setvar "CLAYER" lay)
+    )
+  )
+
+  ;; 2点以上連続 → LWPOLYLINE、それ以外 → LINE
+  (if (and connected (> (length pts) 2))
+    ;; ポリライン描画
+    (progn
+      (command "_.PLINE")
+      (foreach p pts (command p))
+      (command "")
+    )
+    ;; LINE描画（2点ずつ）
+    (progn
+      (setq item (car grp))
+      (command "_.LINE" (cadr item) (caddr item) "")
+    )
+  )
+
+  ;; レイヤを戻す
+  (if lay
+    (setvar "CLAYER" *prev-lay*)
+  )
+)
+
+
+;;------------------------------------------------------------
+;; 公開コマンド定義
+;;------------------------------------------------------------
+
+;; 元のレイヤに生成
+(defun c:POFFSET ()
+  (vl-load-com)
+  (poffset-main nil)
+)
+
+;; カレントレイヤに生成
+(defun c:POFFSETC ()
+  (vl-load-com)
+  (poffset-main T)
+)
+
+(princ "\nPOFFSET / POFFSETC コマンド読み込み完了")
+(princ)
+
 ; =============================================================================
 (princ "\n【acadoc.lsp ロード完了】\n")
 (princ)
