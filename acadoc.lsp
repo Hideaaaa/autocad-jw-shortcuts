@@ -17,6 +17,8 @@
 (setvar "CENTEREXE" 0)   ; 中心線の自動リンクを切る
 (setvar "PICKFIRST" 1)   ; 選択セット初期化
 (setvar "QPMODE" 0)      ; クイックプロパティOFF
+(setvar "AUTOSNAP" (boole 7 (getvar "AUTOSNAP") 8))  ; 極トラッキングON
+(setvar "ORTHOMODE" 0)  ; 直交OFF
 
 ; --- プロッター文字スタイル（SHX単線フォント）の自動作成 ---
 (command "._-STYLE" "Standard"     "simplex.shx,extfont2.shx" "0" "1" "0" "_N" "_N" "_N")
@@ -158,9 +160,129 @@
   (princ)
 )
 
-; BWGT - 未実装（各自追加してください）
-(defun c:BWGT ()
-  (princ "\nBWGT: 未実装")
+; BWGT 面積、板厚から重量
+(defun c:BWGT ( / obj area-mm2 area-m2 thk-mm thk-m dens dens-kgm3 w pt)
+  (vl-load-com)
+
+  ;; 図形を1つ選択
+  (setq obj (car (entsel "\n板を選択してください: ")))
+  (if (null obj)
+    (progn (princ "\n選択されていません。") (princ))
+  )
+
+  ;; 面積取得（mm² → m²）
+  (setq area-mm2 (vla-get-area (vlax-ename->vla-object obj)))
+  (setq area-m2 (/ area-mm2 1000000.0))
+
+  ;; 板厚(mm → m)
+  (setq thk-mm (getreal "\n板厚(mm)を入力: "))
+  (if (null thk-mm) (setq thk-mm 0.0))
+  (setq thk-m (/ thk-mm 1000.0))
+
+  ;; 比重(t/m3 → kg/m3)
+  (setq dens (getreal "\n比重(t/m3) [Enter=7.85]: "))
+  (if (null dens) (setq dens 7.85))
+  (setq dens-kgm3 (* dens 1000.0))
+
+  ;; 重量計算（kg）
+  (setq w (* area-m2 thk-m dens-kgm3))
+
+  ;; 書き込む位置
+  (setq pt (getpoint "\n書き込む位置を指示してください: "))
+
+  ;; ★ 高さ20のTEXTを作成（異尺度対応なし）
+  (entmakex
+    (list
+      '(0 . "TEXT")
+      (cons 10 pt)
+      (cons 40 20.0) ;; ← 高さ20固定
+      (cons 1 (strcat "W:" (rtos w 2 2) "kg  T:" (rtos thk-mm 2 2) "mm"))
+    )
+  )
+
+  (princ (strcat "\n書き込みました → W:" (rtos w 2 2) "kg  T:" (rtos thk-mm 2 2) "mm"))
+  (princ)
+)
+
+(defun c:OC () (command "._OFFSET" "_Layer" "_Current") (princ))
+
+; F:元のレイヤでオフセットFC:オフセットしたものを現在のレイヤに
+(defun c:FC ()
+  (setvar "OFFSETLAYERMODE" 1)
+  (command "OFFSET")
+  (princ)
+)
+
+(defun c:F ()
+  (setvar "OFFSETLAYERMODE" 0)
+  (command "OFFSET")
+  (princ)
+)
+
+; -------------------------------------------------------------------------
+; Z系 - 補助線（HJ画層）管理
+; -------------------------------------------------------------------------
+
+(defun c:Z (/ prev olderr)
+  (setq prev (getvar "CLAYER"))
+  (setq olderr *error*)
+  (defun *error* (msg)
+    (setvar "CLAYER" prev)
+    (setq *error* olderr)
+    (princ)
+  )
+  ; HJ画層がなければ作成（色=251暗めグレー、線種=DASHED2）
+  (if (not (tblsearch "LAYER" "HJ"))
+    (progn
+      (command "._LAYER" "_N" "HJ" "")
+      (command "._LAYER" "_C" 251 "HJ" "")
+      (if (not (tblsearch "LTYPE" "DASHED2"))
+        (command "._LINETYPE" "_L" "DASHED2" "acadiso.lin" "")
+      )
+      (command "._LAYER" "_L" "DASHED2" "HJ" "")
+    )
+  )
+  ; OFFなら表示ON
+  (if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 1) 1)
+    (command "._LAYER" "_ON" "HJ" "")
+  )
+  ; ロックされてたら解除
+  (if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 4) 4)
+    (command "._LAYER" "_U" "HJ" "")
+  )
+  ; HJ画層に切り替え
+  (setvar "CLAYER" "HJ")
+  ; XLINE起動（完全終了まで待つ）
+  (vl-cmdf "._XLINE" pause)
+  ; 元の画層に戻す
+  (setvar "CLAYER" prev)
+  (setq *error* olderr)
+  (princ)
+)
+
+; ZH - 補助線非表示
+(defun c:ZH ()
+  (command "._LAYER" "_OFF" "HJ" "")
+  (princ)
+)
+
+; ZG - 補助線表示
+(defun c:ZG ()
+  (command "._LAYER" "_ON" "HJ" "")
+  (princ)
+)
+
+; ZN - 補助線ノープロット設定（印刷前に実行）
+(defun c:ZN ()
+  (command "._LAYER" "_P" "_N" "HJ" "")
+  (princ "\nHJ画層をノープロットに設定。印刷後にZNNで元に戻します。")
+  (princ)
+)
+
+; ZNN - 補助線ノープロット解除（印刷後に実行）
+(defun c:ZNN ()
+  (command "._LAYER" "_P" "_P" "HJ" "")
+  (princ "\nHJ画層を印刷設定に戻しました。")
   (princ)
 )
 
