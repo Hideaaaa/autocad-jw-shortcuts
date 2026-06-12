@@ -108,34 +108,68 @@
 )
 
 ; -------------------------------------------------------------------------
-; 【6. W - 属性取得（JWGET）】
+; W - 属性取得（JWGET）
 ; オブジェクトの画層・色・線種・文字スタイル・寸法スタイル・ハッチを一括取得
-; Windows 動作確認済み / Mac 未検証
+; ロックされた画層も1クリックで取得・自動ロック解除
+; Windows,Mac 動作確認済み
 ; -------------------------------------------------------------------------
-(defun c:W (/ e ed ds)
+(defun c:W (/ e ed ds layname laydata colorval pt)
+  ; まずentselで試みる、失敗したらnentselp（ロック画層対応）
   (setq e (car (entsel "\n属性取得: ")))
+  (if (not e)
+    (progn
+      (setq pt (getpoint "\nロック画層を指定: "))
+      (setq e (car (nentselp pt)))
+    )
+  )
   (if e
     (progn
       (setq ed (entget e))
-      (if (assoc 8   ed) (setvar "CLAYER"    (cdr (assoc 8   ed))))
-
-      (if (assoc 62  ed) (command "_.-COLOR" (itoa (cdr (assoc 62 ed)))) (command "_.-COLOR" "_BYLAYER"))
-      (if (assoc 6   ed) (setvar "CELTYPE"   (cdr (assoc 6   ed))))
+      (setq layname (cdr (assoc 8 ed)))
+      ; ロックされてたら解除
+      (if layname
+        (progn
+          (setq laydata (tblsearch "LAYER" layname))
+          (if (and laydata (= (logand (cdr (assoc 70 laydata)) 4) 4))
+            (progn
+              (command "._LAYER" "_U" layname "")
+              (princ (strcat "\n" layname " 画層のロックを解除しました"))
+            )
+          )
+        )
+      )
+      ; 画層
+      (if (assoc 8 ed) (setvar "CLAYER" (cdr (assoc 8 ed))))
+      ; 色（0や256は無効なのでBYLAYERにする）
+      (setq colorval (cdr (assoc 62 ed)))
+      (if (and colorval (> colorval 0) (< colorval 256))
+        (command "_.-COLOR" (itoa colorval))
+        (command "_.-COLOR" "_BYLAYER")
+      )
+      ; 線種
+      (if (assoc 6 ed) (setvar "CELTYPE" (cdr (assoc 6 ed))))
+      ; 線幅
       (if (assoc 370 ed) (setvar "CELWEIGHT" (cdr (assoc 370 ed))))
+      ; 文字スタイル・サイズ
       (if (member (cdr (assoc 0 ed)) '("TEXT" "MTEXT"))
         (progn
           (if (assoc 7  ed) (setvar "TEXTSTYLE" (cdr (assoc 7  ed))))
           (if (assoc 40 ed) (setvar "TEXTSIZE"  (cdr (assoc 40 ed))))))
+      ; 寸法スタイル
       (if (member (cdr (assoc 0 ed)) '("DIMENSION"))
         (progn
           (setq ds (cdr (assoc 3 ed)))
           (if ds (command "_.DIMSTYLE" "_R" ds))))
+      ; 線種尺度
       (if (assoc 48 ed) (setvar "CELTSCALE" (cdr (assoc 48 ed))))
+      ; ハッチ
       (if (= (cdr (assoc 0 ed)) "HATCH")
         (progn
           (if (assoc 41 ed) (setvar "HPSCALE" (cdr (assoc 41 ed))))
           (if (assoc 52 ed) (setvar "HPANG"   (cdr (assoc 52 ed))))))
-      (princ "\n現在属性を取得しました")))
+      (princ "\n現在属性を取得しました"))
+    (princ "\nオブジェクトが見つかりません")
+  )
   (princ)
 )
 
