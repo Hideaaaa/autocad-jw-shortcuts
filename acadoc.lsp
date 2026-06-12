@@ -118,6 +118,7 @@
     (progn
       (setq ed (entget e))
       (if (assoc 8   ed) (setvar "CLAYER"    (cdr (assoc 8   ed))))
+
       (if (assoc 62  ed) (command "_.-COLOR" (itoa (cdr (assoc 62 ed)))) (command "_.-COLOR" "_BYLAYER"))
       (if (assoc 6   ed) (setvar "CELTYPE"   (cdr (assoc 6   ed))))
       (if (assoc 370 ed) (setvar "CELWEIGHT" (cdr (assoc 370 ed))))
@@ -223,7 +224,9 @@
 ; Z系 - 補助線（HJ画層）管理
 ; -------------------------------------------------------------------------
 
-(defun c:Z (/ prev olderr)
+; Z - HJ画層に切り替えてXLINE起動
+;     非表示・フリーズなら自動解除、なければ作成、終了後元の画層に戻る
+(defun c:Z (/ prev olderr laydata)
   (setq prev (getvar "CLAYER"))
   (setq olderr *error*)
   (defun *error* (msg)
@@ -242,14 +245,20 @@
       (command "._LAYER" "_L" "DASHED2" "HJ" "")
     )
   )
+  (setq laydata (tblsearch "LAYER" "HJ"))
+  ; フリーズされてたら解除
+  (if (= (logand (cdr (assoc 70 laydata)) 1) 1)
+    (command "._LAYER" "_T" "HJ" "")
+  )
   ; OFFなら表示ON
-  (if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 1) 1)
+  (if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 2) 0)
     (command "._LAYER" "_ON" "HJ" "")
   )
   ; ロックされてたら解除
   (if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 4) 4)
     (command "._LAYER" "_U" "HJ" "")
   )
+  
   ; HJ画層に切り替え
   (setvar "CLAYER" "HJ")
   ; XLINE起動（完全終了まで待つ）
@@ -260,17 +269,50 @@
   (princ)
 )
 
-; ZH - 補助線非表示
-(defun c:ZH ()
+; ZZ - 補助線非表示
+(defun c:ZZ ()
   (command "._LAYER" "_OFF" "HJ" "")
+  (command "._REGEN")
   (princ)
 )
 
-; ZG - 補助線表示
-(defun c:ZG ()
-  (command "._LAYER" "_ON" "HJ" "")
+; ZD - 補助線全削除
+(defun c:ZD (/ ss)
+  (setq ss (ssget "X" '((8 . "HJ"))))
+  (if ss
+    (progn
+      (command "._ERASE" ss "")
+      (princ "\nHJ画層のオブジェクトをすべて削除しました。")
+    )
+    (princ "\nHJ画層にオブジェクトはありません。")
+  )
   (princ)
 )
+
+; ZF - 補助線フリーズ
+(defun c:ZF ()
+  (command "._LAYER" "_F" "HJ" "")
+  (princ)
+)
+
+; ZFF - 補助線フリーズ解除
+(defun c:ZFF ()
+  (command "._LAYER" "_T" "HJ" "")
+  (princ)
+)
+
+; ZR - 補助線ロック（編集禁止）
+(defun c:ZR ()
+  (command "._LAYER" "_LO" "HJ" "")
+  (princ)
+)
+
+; ZRR - 補助線ロック解除
+(defun c:ZRR ()
+  (command "._LAYER" "_U" "HJ" "")
+  (princ)
+)
+
 
 ; ZN - 補助線ノープロット設定（印刷前に実行）
 (defun c:ZN ()
