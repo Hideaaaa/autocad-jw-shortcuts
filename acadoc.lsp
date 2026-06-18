@@ -289,9 +289,9 @@
     (command "._LAYER" "_ON" "HJ" "")
   )
   ; ロックされてたら解除
-  (if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 4) 4)
-    (command "._LAYER" "_U" "HJ" "")
-  )
+  ;(if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 4) 4)
+  ;  (command "._LAYER" "_U" "HJ" "")
+  ;)
   
   ; HJ画層に切り替え
   (setvar "CLAYER" "HJ")
