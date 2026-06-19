@@ -2,8 +2,8 @@
 ; acadoc.lsp - AutoCAD Jw風カスタムLISPルーチン集
 ; =============================================================================
 ; 動作確認環境:
-;   - Windows AutoCAD 2024/2025/2026 ✓
-;   - Mac: FC・AC・AS・AD のみ動作確認済み、他は未検証
+;   - Windows AutoCAD 2027
+;   - Mac AutoCAD 2026
 ;
 ; ロード方法:
 ;   AutoCADのサポートファイル検索パスに
@@ -19,7 +19,7 @@
 (setvar "QPMODE" 0)      ; クイックプロパティOFF
 (setvar "AUTOSNAP" (boole 7 (getvar "AUTOSNAP") 8))  ; 極トラッキングON
 (setvar "ORTHOMODE" 0)  ; 直交OFF
-
+(setvar "FILEDIA" 1)	;保存ダイヤログを表示
 ; --- プロッター文字スタイル（SHX単線フォント）の自動作成 ---
 (command "._-STYLE" "Standard"     "simplex.shx,extfont2.shx" "0" "1" "0" "_N" "_N" "_N")
 (command "._-STYLE" "Plotter-Font" "simplex.shx,extfont2.shx" "0" "1" "0" "_N" "_N" "_N")
@@ -94,18 +94,6 @@
   (princ)
 )
 
-; -------------------------------------------------------------------------
-; 【5. FC - オフセット→現在の画層に作成】
-; F = OFFSET の派生、FC = F + Current layer
-; Windows/Mac 動作確認済み
-; -------------------------------------------------------------------------
-(defun c:FC (/ prev)
-  (setq prev (getvar "OFFSETLAYERMODE"))
-  (setvar "OFFSETLAYERMODE" 1)
-  (command "OFFSET")
-  (setvar "OFFSETLAYERMODE" prev)
-  (princ)
-)
 
 ; -------------------------------------------------------------------------
 ; W - 属性取得（JWGET）
@@ -239,35 +227,17 @@
   (princ)
 )
 
-(defun c:OC () (command "._OFFSET" "_Layer" "_Current") (princ))
-
-; F:元のレイヤでオフセットFC:オフセットしたものを現在のレイヤに
-;(defun c:FC ()
-;  (setvar "OFFSETLAYERMODE" 1)
-;  (command "OFFSET")
-;  (princ)
-;)
-
-;(defun c:F ()
-;  (setvar "OFFSETLAYERMODE" 0)
-;  (command "OFFSET")
-;  (princ)
-;)
 
 ; -------------------------------------------------------------------------
 ; Z系 - 補助線（HJ画層）管理
+; ロック基本運用版
 ; -------------------------------------------------------------------------
 
-; Z - HJ画層に切り替えてXLINE起動
-;     非表示・フリーズなら自動解除、なければ作成、終了後元の画層に戻る
-(defun c:Z (/ prev olderr laydata)
-  (setq prev (getvar "CLAYER"))
-  (setq olderr *error*)
-  (defun *error* (msg)
-    (setvar "CLAYER" prev)
-    (setq *error* olderr)
-    (princ)
-  )
+; Z - 補助線を引く（2点で自動判定→オリジナル無限長）
+;     1点目を指定→2点目を指定→距離から水平/垂直を自動判定
+;     十分に長い線を両方向に引く
+;     実行前のロック状態を記憶して復帰
+(defun c:Z (/ prev pt1 pt2 dx dy large laydata islocked)
   ; HJ画層がなければ作成（色=251暗めグレー、線種=DASHED2）
   (if (not (tblsearch "LAYER" "HJ"))
     (progn
@@ -279,27 +249,116 @@
       (command "._LAYER" "_L" "DASHED2" "HJ" "")
     )
   )
-  (setq laydata (tblsearch "LAYER" "HJ"))
-  ; フリーズされてたら解除
-  (if (= (logand (cdr (assoc 70 laydata)) 1) 1)
-    (command "._LAYER" "_T" "HJ" "")
-  )
-  ; OFFなら表示ON
-  (if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 2) 0)
-    (command "._LAYER" "_ON" "HJ" "")
-  )
-  ; ロックされてたら解除
-  ;(if (= (logand (cdr (assoc 70 (tblsearch "LAYER" "HJ"))) 4) 4)
-  ;  (command "._LAYER" "_U" "HJ" "")
-  ;)
   
-  ; HJ画層に切り替え
+  ; HJ画層のロック状態を記憶（ビット4がロック）
+  (setq laydata (tblsearch "LAYER" "HJ"))
+  (setq islocked (= (logand (cdr (assoc 70 laydata)) 4) 4))
+  
+  (command "._LAYER" "_U" "HJ" "")
+  (setq prev (getvar "CLAYER"))
   (setvar "CLAYER" "HJ")
-  ; XLINE起動（完全終了まで待つ）
-  (vl-cmdf "._XLINE" pause)
-  ; 元の画層に戻す
+  
+  ; 無限長として使う大きな値
+  (setq large 100000)
+  
+  (while (setq pt1 (getpoint "\n最初の点を指定（Esc終了）: "))
+    (setq pt2 (getpoint pt1 "\n2番目の点を指定: "))
+    
+    ; X方向とY方向の距離を計算
+    (setq dx (abs (- (car pt2) (car pt1))))
+    (setq dy (abs (- (cadr pt2) (cadr pt1))))
+    
+    ; どちらが大きいかで水平/垂直を判定して線を引く
+    (if (>= dx dy)
+      ; 水平線：Y座標は固定、X方向に十分長い線
+      (command "._LINE" 
+        (list (- (car pt1) large) (cadr pt1)) 
+        (list (+ (car pt1) large) (cadr pt1)) 
+        "")
+      ; 垂直線：X座標は固定、Y方向に十分長い線
+      (command "._LINE" 
+        (list (car pt1) (- (cadr pt1) large)) 
+        (list (car pt1) (+ (cadr pt1) large)) 
+        "")
+    )
+  )
+  
   (setvar "CLAYER" prev)
-  (setq *error* olderr)
+  ; 元のロック状態に復帰
+  (if islocked
+    (command "._LAYER" "_LO" "HJ" "")
+  )
+  (princ)
+)
+
+; ZD - 補助線を選択して削除（ロック自動管理）
+;      ロック状態でも削除可能。ロックされていたら復帰
+(defun c:ZD (/ ss laydata islocked)
+  (setq laydata (tblsearch "LAYER" "HJ"))
+  ; ロック状態をチェック（ビット4がロック）
+  (setq islocked (= (logand (cdr (assoc 70 laydata)) 4) 4))
+  
+  ; ロックされていたら解除
+  (if islocked
+    (progn
+      (command "._LAYER" "_U" "HJ" "")
+      (command nil)  ; バッファクリア
+    )
+  )
+  
+  (princ "\n削除する補助線を選択 > ")
+  ; ユーザーに選択させる
+  (setq ss (ssget '((8 . "HJ"))))
+  
+  (if ss
+    (progn
+      (command "._ERASE" ss "")
+      (princ "\n選択したHJ画層の補助線を削除しました。")
+    )
+    (princ "\n選択がキャンセルされました。")
+  )
+  
+  ; ロックされていたら再びロック状態に戻す
+  (if islocked
+    (progn
+      (command "._LAYER" "_LO" "HJ" "")
+      (command nil)  ; バッファクリア
+    )
+  )
+  (princ)
+)
+
+; ZDD - 補助線を全削除（ロック自動管理）
+;       ロック状態でも削除可能。ロックされていたら復帰
+(defun c:ZDD (/ ss laydata islocked)
+  (setq laydata (tblsearch "LAYER" "HJ"))
+  ; ロック状態をチェック（ビット4がロック）
+  (setq islocked (= (logand (cdr (assoc 70 laydata)) 4) 4))
+  
+  (if (setq ss (ssget "X" '((8 . "HJ"))))
+    (progn
+      ; ロックされていたら解除
+      (if islocked
+        (progn
+          (command "._LAYER" "_U" "HJ" "")
+          (command nil)  ; バッファクリア
+        )
+      )
+      
+      (princ "\nHJ画層の全補助線を削除します...")
+      (command "._ERASE" ss "")
+      (princ "\nHJ画層のオブジェクトをすべて削除しました。")
+      
+      ; ロックされていたら再びロック状態に戻す
+      (if islocked
+        (progn
+          (command "._LAYER" "_LO" "HJ" "")
+          (command nil)  ; バッファクリア
+        )
+      )
+    )
+    (princ "\nHJ画層にオブジェクトはありません。")
+  )
   (princ)
 )
 
@@ -307,19 +366,6 @@
 (defun c:ZZ ()
   (command "._LAYER" "_OFF" "HJ" "")
   (command "._REGEN")
-  (princ)
-)
-
-; ZD - 補助線全削除
-(defun c:ZD (/ ss)
-  (setq ss (ssget "X" '((8 . "HJ"))))
-  (if ss
-    (progn
-      (command "._ERASE" ss "")
-      (princ "\nHJ画層のオブジェクトをすべて削除しました。")
-    )
-    (princ "\nHJ画層にオブジェクトはありません。")
-  )
   (princ)
 )
 
@@ -346,7 +392,6 @@
   (command "._LAYER" "_U" "HJ" "")
   (princ)
 )
-
 
 ; ZN - 補助線ノープロット設定（印刷前に実行）
 (defun c:ZN ()
