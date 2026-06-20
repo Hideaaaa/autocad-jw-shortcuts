@@ -20,6 +20,8 @@
 (setvar "AUTOSNAP" (boole 7 (getvar "AUTOSNAP") 8))  ; 極トラッキングON
 (setvar "ORTHOMODE" 0)  ; 直交OFF
 (setvar "FILEDIA" 1)	;保存ダイヤログを表示
+(setvar "LWDISPLAY" 1)	;線幅を設定
+
 ; --- プロッター文字スタイル（SHX単線フォント）の自動作成 ---
 (command "._-STYLE" "Standard"     "simplex.shx,extfont2.shx" "0" "1" "0" "_N" "_N" "_N")
 (command "._-STYLE" "Plotter-Font" "simplex.shx,extfont2.shx" "0" "1" "0" "_N" "_N" "_N")
