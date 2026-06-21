@@ -11,6 +11,8 @@
 ;   acad.lsp / acaddoc.lsp から (load "acadoc.lsp") で呼び出す
 ; =============================================================================
 
+(load "bbl.lsp")
+
 ; -------------------------------------------------------------------------
 ; 【1. システム変数 & スタイル・寸法の自動生成】
 ; -------------------------------------------------------------------------
@@ -185,49 +187,466 @@
   (princ)
 )
 
-; BWGT 面積、板厚から重量
-(defun c:BWGT ( / obj area-mm2 area-m2 thk-mm thk-m dens dens-kgm3 w pt)
-  (vl-load-com)
+; BWGT 面積、板厚から重量（BWGTレイヤへCSV形式記録）
+; BWGT: 通常板（複数可）  BWGTH: 穴あき板
+; BWGTC: CSV出力         BWGTCHK: 計算検証
 
-  ;; 図形を1つ選択
-  (setq obj (car (entsel "\n板を選択してください: ")))
-  (if (null obj)
-    (progn (princ "\n選択されていません。") (princ))
-  )
+(defun bwgt:ensure-layer (/)
+  (if (not (tblsearch "LAYER" "BWGT"))
+    (entmake
+      (list
+        '(0 . "LAYER")
+        '(100 . "AcDbSymbolTableRecord")
+        '(100 . "AcDbLayerTableRecord")
+        '(70 . 0)
+        '(62 . 8)
+        '(6 . "Continuous")
+        '(2 . "BWGT"))))
+  (bwgt:set-layer-color "BWGT" 8)
+  (princ))
 
-  ;; 面積取得（mm² → m²）
-  (setq area-mm2 (vla-get-area (vlax-ename->vla-object obj)))
-  (setq area-m2 (/ area-mm2 1000000.0))
+(defun bwgt:unlock-layer (/)
+  (bwgt:set-layer-lock "BWGT" nil)
+  (princ))
 
-  ;; 板厚(mm → m)
-  (setq thk-mm (getreal "\n板厚(mm)を入力: "))
-  (if (null thk-mm) (setq thk-mm 0.0))
-  (setq thk-m (/ thk-mm 1000.0))
+(defun bwgt:lock-layer (/)
+  (bwgt:set-layer-lock "BWGT" T)
+  (princ))
 
-  ;; 比重(t/m3 → kg/m3)
-  (setq dens (getreal "\n比重(t/m3) [Enter=7.85]: "))
-  (if (null dens) (setq dens 7.85))
-  (setq dens-kgm3 (* dens 1000.0))
+(defun bwgt:put-or-add (code val ed / pair)
+  (if (setq pair (assoc code ed))
+    (subst (cons code val) pair ed)
+    (append ed (list (cons code val)))))
 
-  ;; 重量計算（kg）
-  (setq w (* area-m2 thk-m dens-kgm3))
+(defun bwgt:set-layer-color (lay col / e ed)
+  (if (setq e (tblobjname "LAYER" lay))
+    (progn
+      (setq ed (entget e))
+      (setq ed (bwgt:put-or-add 62 col ed))
+      (entmod ed)
+      (entupd e))))
 
-  ;; 書き込む位置
-  (setq pt (getpoint "\n書き込む位置を指示してください: "))
+(defun bwgt:set-layer-lock (lay lockp / e ed f70)
+  (if (setq e (tblobjname "LAYER" lay))
+    (progn
+      (setq ed (entget e))
+      (setq f70 (cdr (assoc 70 ed)))
+      (if (null f70) (setq f70 0))
+      (if lockp
+        (if (= 0 (logand f70 4)) (setq f70 (+ f70 4)))
+        (if (/= 0 (logand f70 4)) (setq f70 (- f70 4))))
+      (setq ed (bwgt:put-or-add 70 f70 ed))
+      (entmod ed)
+      (entupd e))))
 
-  ;; ★ 高さ20のTEXTを作成（異尺度対応なし）
-  (entmakex
-    (list
-      '(0 . "TEXT")
-      (cons 10 pt)
-      (cons 40 20.0) ;; ← 高さ20固定
-      (cons 1 (strcat "W:" (rtos w 2 2) "kg  T:" (rtos thk-mm 2 2) "mm"))
-    )
-  )
+(defun bwgt:pt2d (pt)
+  (list (car pt) (cadr pt) 0.0))
 
-  (princ (strcat "\n書き込みました → W:" (rtos w 2 2) "kg  T:" (rtos thk-mm 2 2) "mm"))
-  (princ)
-)
+; ---- 純 AutoLISP 面積計算（AREA コマンド不使用） ----
+
+(defun bwgt:shoelace (pts / n i j area)
+  (setq n (length pts))
+  (if (< n 3)
+    0.0
+    (progn
+      (setq area 0.0 i 0)
+      (while (< i n)
+        (setq j (rem (+ i 1) n))
+        (setq area (+ area
+          (- (* (car  (nth i pts)) (cadr (nth j pts)))
+             (* (car  (nth j pts)) (cadr (nth i pts))))))
+        (setq i (1+ i)))
+      (abs (/ area 2.0)))))
+
+(defun bwgt:calc-area-mm2 (ent / ed typ pts e vdata)
+  (setq ed (entget ent))
+  (setq typ (cdr (assoc 0 ed)))
+  (cond
+    ((= typ "CIRCLE")
+     (* pi (expt (cdr (assoc 40 ed)) 2.0)))
+    ((= typ "LWPOLYLINE")
+     (setq pts '())
+     (foreach pair ed
+       (if (= (car pair) 10)
+         (setq pts (append pts (list (cdr pair))))))
+     (bwgt:shoelace pts))
+    ((= typ "POLYLINE")
+     (setq pts '())
+     (setq e (entnext ent))
+     (while (and e (= (cdr (assoc 0 (entget e))) "VERTEX"))
+       (setq vdata (entget e))
+       (setq pts (append pts (list (cdr (assoc 10 vdata)))))
+       (setq e (entnext e)))
+     (bwgt:shoelace pts))
+    (T nil)))
+
+(defun bwgt:calc-weight-kg (area-mm2 thk-mm dens-tm3)
+  (* (/ area-mm2 1000000.0) (/ thk-mm 1000.0) dens-tm3 1000.0))
+
+(defun bwgt:anno-scale (/ s)
+  (setq s (getvar "CANNOSCALEVALUE"))
+  (if (and (numberp s) (> s 0.0)) s 1.0))
+
+; ---- 幾何ヘルパー ----
+
+(defun bwgt:bbox-center (pts / p xmin xmax ymin ymax)
+  (if (null pts)
+    nil
+    (progn
+      (setq p (car pts)
+            xmin (car p) xmax (car p) ymin (cadr p) ymax (cadr p))
+      (foreach p (cdr pts)
+        (if (< (car p) xmin) (setq xmin (car p)))
+        (if (> (car p) xmax) (setq xmax (car p)))
+        (if (< (cadr p) ymin) (setq ymin (cadr p)))
+        (if (> (cadr p) ymax) (setq ymax (cadr p))))
+      (list (/ (+ xmin xmax) 2.0) (/ (+ ymin ymax) 2.0) 0.0))))
+
+(defun bwgt:lwpoly-pts (ed / pts)
+  (setq pts '())
+  (foreach pair ed
+    (if (= (car pair) 10)
+      (setq pts (append pts (list (cdr pair))))))
+  pts)
+
+(defun bwgt:poly-pts (ent / e ed pts)
+  (setq pts '())
+  (setq e (entnext ent))
+  (while (and e (= (cdr (assoc 0 (entget e))) "VERTEX"))
+    (setq ed (entget e))
+    (setq pts (append pts (list (cdr (assoc 10 ed)))))
+    (setq e (entnext e)))
+  pts)
+
+(defun bwgt:entity-center (ent / ed typ)
+  (setq ed (entget ent))
+  (setq typ (cdr (assoc 0 ed)))
+  (cond
+    ((member typ '("CIRCLE" "ARC" "ELLIPSE" "INSERT" "TEXT" "MTEXT"))
+     (bwgt:pt2d (cdr (assoc 10 ed))))
+    ((= typ "LWPOLYLINE")
+     (bwgt:bbox-center (bwgt:lwpoly-pts ed)))
+    ((= typ "POLYLINE")
+     (bwgt:bbox-center (bwgt:poly-pts ent)))
+    (T
+     (if (assoc 10 ed)
+       (bwgt:pt2d (cdr (assoc 10 ed)))
+       nil))))
+
+(defun bwgt:nearest-point (base pts / p best bestd d)
+  (setq best nil bestd 1.0e99)
+  (foreach p pts
+    (setq d (distance base p))
+    (if (< d bestd) (progn (setq best p) (setq bestd d))))
+  best)
+
+(defun bwgt:entity-anchor (ent ref-pt / ed typ center rad)
+  (setq ed (entget ent))
+  (setq typ (cdr (assoc 0 ed)))
+  (cond
+    ((= typ "LINE")
+     (list
+       (/ (+ (car  (cdr (assoc 10 ed))) (car  (cdr (assoc 11 ed)))) 2.0)
+       (/ (+ (cadr (cdr (assoc 10 ed))) (cadr (cdr (assoc 11 ed)))) 2.0)
+       0.0))
+    ((= typ "LWPOLYLINE")
+     (bwgt:nearest-point ref-pt (bwgt:lwpoly-pts ed)))
+    ((= typ "POLYLINE")
+     (bwgt:nearest-point ref-pt (bwgt:poly-pts ent)))
+    ((= typ "CIRCLE")
+     (setq center (bwgt:pt2d (cdr (assoc 10 ed))))
+     (setq rad (cdr (assoc 40 ed)))
+     (polar center (angle center ref-pt) rad))
+    ((= typ "ARC")
+     (setq center (bwgt:pt2d (cdr (assoc 10 ed))))
+     (setq rad (cdr (assoc 40 ed)))
+     (polar center (angle center ref-pt) rad))
+    (T (bwgt:entity-center ent))))
+
+(defun bwgt:auto-text-point (center idx th)
+  (list
+    (+ (car  center) (* 8.0 th))
+    (+ (cadr center) (* th (+ 3.0 (* 2.0 idx))))
+    0.0))
+
+(defun bwgt:starts-with (s prefix)
+  (and s prefix
+       (>= (strlen s) (strlen prefix))
+       (= (substr s 1 (strlen prefix)) prefix)))
+
+(defun bwgt:csv-text (txt / pos)
+  (cond
+    ((null txt) nil)
+    (T
+     (setq pos (vl-string-search "| BWGT," txt))
+     (if pos (substr txt (+ pos 4)) nil))))
+
+(defun bwgt:split (s sep / pos out token)
+  (setq out '())
+  (while (setq pos (vl-string-search sep s))
+    (setq token (substr s 1 pos))
+    (setq out (append out (list token)))
+    (setq s (substr s (+ pos (strlen sep) 1))))
+  (append out (list s)))
+
+(defun bwgt:next-id (/ ss i ent ed txt cols maxid idval)
+  (setq maxid 0)
+  (if (setq ss (ssget "X" '((8 . "BWGT") (0 . "TEXT"))))
+    (progn
+      (setq i 0)
+      (while (< i (sslength ss))
+        (setq ent (ssname ss i))
+        (setq ed (entget ent))
+        (setq txt (bwgt:csv-text (cdr (assoc 1 ed))))
+        (if txt
+          (progn
+            (setq cols (bwgt:split txt ","))
+            (if (>= (length cols) 2)
+              (progn
+                (setq idval (atoi (nth 1 cols)))
+                (if (> idval maxid) (setq maxid idval))))))
+        (setq i (1+ i)))))
+  (1+ maxid))
+
+(defun bwgt:ask-params (/)
+  (if (not (numberp *bwgt-last-thk*))  (setq *bwgt-last-thk*  9.0))
+  (if (not (numberp *bwgt-last-dens*)) (setq *bwgt-last-dens* 7.85))
+  (setq bwgt:tmp (getreal (strcat "\n板厚 t(mm) [Enter=" (rtos *bwgt-last-thk* 2 2) "]: ")))
+  (if (numberp bwgt:tmp)
+    (setq *bwgt-last-thk* bwgt:tmp))
+  (setq bwgt:tmp (getreal (strcat "\n密度 t/m3 [Enter=" (rtos *bwgt-last-dens* 2 2) "]: ")))
+  (if (numberp bwgt:tmp)
+    (setq *bwgt-last-dens* bwgt:tmp))
+  T)
+
+(defun bwgt:make-group (name ss /)
+  (if (and ss (> (sslength ss) 0))
+    (progn
+      (setq bwgt:nod (namedobjdict))
+      (setq bwgt:gd (dictsearch bwgt:nod "ACAD_GROUP"))
+      (if bwgt:gd
+        (setq bwgt:gdict (cdr (assoc -1 bwgt:gd)))
+        (setq bwgt:gdict
+          (dictadd bwgt:nod "ACAD_GROUP"
+            (entmakex '((0 . "DICTIONARY") (100 . "AcDbDictionary") (280 . 0) (281 . 1))))))
+      (setq bwgt:i 0)
+      (setq bwgt:data
+        (list
+          '(0 . "GROUP")
+          '(100 . "AcDbGroup")
+          '(300 . "BWGT")
+          '(70 . 0)
+          '(71 . 1)))
+      (while (< bwgt:i (sslength ss))
+        (setq bwgt:data (append bwgt:data (list (cons 340 (ssname ss bwgt:i)))))
+        (setq bwgt:i (1+ bwgt:i)))
+      (setq bwgt:grp (entmakex bwgt:data))
+      (if bwgt:grp
+        (vl-catch-all-apply 'dictadd (list bwgt:gdict name bwgt:grp)))))
+  (princ))
+
+(defun bwgt:number-text-p (s / n)
+  (setq n (distof s 2))
+  (numberp n))
+
+(defun bwgt:valid-csv-cols (cols)
+  (and (>= (length cols) 6)
+       (> (atoi (nth 1 cols)) 0)
+       (bwgt:number-text-p (nth 3 cols))
+       (bwgt:number-text-p (nth 4 cols))
+       (bwgt:number-text-p (nth 5 cols))))
+
+; 1 件の注記＋矢印を作成してグループ化、成功なら T を返す
+(defun bwgt:draw-record (id area-mm2 thk-mm dens w ent idx th
+                         / center txtpt anchor csvline label grp-ss ang wing p1 p2)
+  (setq center (bwgt:entity-center ent))
+  (if (null center)
+    nil
+    (progn
+      (setq txtpt (bwgt:auto-text-point center idx th))
+      (setq anchor (bwgt:entity-anchor ent txtpt))
+      (setq csvline
+        (strcat "BWGT," (itoa id)
+          "," (rtos (/ area-mm2 1000000.0) 2 6)
+          "," (rtos thk-mm 2 3)
+          "," (rtos dens 2 4)
+          "," (rtos w 2 3)))
+      (setq label
+        (strcat "ID" (itoa id)
+          "  t=" (rtos thk-mm 2 1) "mm"
+          "  W=" (rtos w 2 2) "kg"
+          "  | " csvline))
+      (entmakex
+        (list '(0 . "TEXT")
+          (cons 8 "BWGT")
+          (cons 10 txtpt)
+          (cons 40 th)
+          (cons 1 label)))
+      (setq grp-ss (ssadd))
+      (ssadd (entlast) grp-ss)
+      (if (and anchor (> (distance txtpt anchor) 0.001))
+        (progn
+          (setq ang  (angle txtpt anchor))
+          (setq wing (* th 1.2))
+          (entmakex (list '(0 . "LINE") (cons 8 "BWGT")
+            (cons 10 txtpt) (cons 11 anchor)))
+          (ssadd (entlast) grp-ss)
+          (setq p1 (polar anchor (+ ang 2.7) wing))
+          (setq p2 (polar anchor (- ang 2.7) wing))
+          (entmakex (list '(0 . "LINE") (cons 8 "BWGT")
+            (cons 10 anchor) (cons 11 p1)))
+          (ssadd (entlast) grp-ss)
+          (entmakex (list '(0 . "LINE") (cons 8 "BWGT")
+            (cons 10 anchor) (cons 11 p2)))
+          (ssadd (entlast) grp-ss)))
+      (bwgt:make-group (strcat "BW" (itoa id)) grp-ss)
+      T)))
+
+(defun c:BWGT (/ ss i ent area-mm2 w id th ok)
+  (if (not (numberp *bwgt-last-thk*))  (setq *bwgt-last-thk*  9.0))
+  (if (not (numberp *bwgt-last-dens*)) (setq *bwgt-last-dens* 7.85))
+  (setq ss (ssget "_I"))
+  (if (not ss)
+    (progn
+      (princ "\n板を選択してください（窓選択可）: ")
+      (setq ss (ssget))))
+  (if (not ss)
+    (princ "\n選択されていません。")
+    (progn
+      (bwgt:ask-params)
+      (bwgt:ensure-layer)
+      (bwgt:unlock-layer)
+      (setq id (bwgt:next-id))
+      (setq th (max 1.0 (* 2.0 (getvar "TEXTSIZE") (bwgt:anno-scale))))
+      (setq i 0 ok 0)
+      (while (< i (sslength ss))
+        (setq ent (ssname ss i))
+        (setq area-mm2 (bwgt:calc-area-mm2 ent))
+        (if (and area-mm2 (> area-mm2 0.0))
+          (progn
+            (setq w (bwgt:calc-weight-kg area-mm2 *bwgt-last-thk* *bwgt-last-dens*))
+            (if (bwgt:draw-record id area-mm2 *bwgt-last-thk* *bwgt-last-dens* w ent ok th)
+              (progn
+                (setq id (1+ id))
+                (setq ok (1+ ok))))))
+        (setq i (1+ i)))
+      (bwgt:lock-layer)
+      (princ (strcat "\nBWGT記録: " (itoa ok) " 件"))))
+  (princ))
+
+(defun c:BWGTH (/ outer area-mm2 holes i ent hs hole-sum net-mm2 w id th)
+  (if (not (numberp *bwgt-last-thk*))  (setq *bwgt-last-thk*  9.0))
+  (if (not (numberp *bwgt-last-dens*)) (setq *bwgt-last-dens* 7.85))
+  (setq outer (car (entsel "\n外形を選択: ")))
+  (if (null outer)
+    (princ "\nキャンセルされました。")
+    (progn
+      (setq area-mm2 (bwgt:calc-area-mm2 outer))
+      (if (or (null area-mm2) (<= area-mm2 0.0))
+        (princ "\n面積取得できません。閉じたポリライン/円を使用してください。")
+        (progn
+          (princ "\n穴境界を選択（なければ Enter）: ")
+          (setq holes (ssget))
+          (setq hole-sum 0.0)
+          (if holes
+            (progn
+              (setq i 0)
+              (while (< i (sslength holes))
+                (setq ent (ssname holes i))
+                (setq hs (bwgt:calc-area-mm2 ent))
+                (if (and hs (> hs 0.0))
+                  (setq hole-sum (+ hole-sum hs)))
+                (setq i (1+ i)))))
+          (setq net-mm2 (- area-mm2 hole-sum))
+          (if (<= net-mm2 0.0)
+            (princ "\n正味面積が0以下です。")
+            (progn
+              (princ
+                (strcat "\n外形=" (rtos (/ area-mm2 1e6) 2 4)
+                  "m2  穴=" (rtos (/ hole-sum 1e6) 2 4)
+                  "m2  正味=" (rtos (/ net-mm2 1e6) 2 4) "m2"))
+              (bwgt:ask-params)
+              (setq w (bwgt:calc-weight-kg net-mm2 *bwgt-last-thk* *bwgt-last-dens*))
+              (bwgt:ensure-layer)
+              (bwgt:unlock-layer)
+              (setq id (bwgt:next-id))
+              (setq th (max 1.0 (* 2.0 (getvar "TEXTSIZE") (bwgt:anno-scale))))
+              (bwgt:draw-record id net-mm2 *bwgt-last-thk* *bwgt-last-dens* w outer 0 th)
+              (bwgt:lock-layer)
+              (princ (strcat "\nBWGTH記録: ID=" (itoa id) "  重量=" (rtos w 2 2) "kg"))))))))
+  (princ))
+
+(defun c:BWGTCHK (/ area thk dens actual)
+  ; 検証: 1m x 1m x 1mm x 7.85t/m3 = 7.85kg
+  (setq area 1000000.0 thk 1.0 dens 7.85)
+  (setq actual (bwgt:calc-weight-kg area thk dens))
+  (princ (strcat "\nBWGTCHK: 1m2 x 1mm x 7.85t/m3 = "
+    (rtos actual 2 6) "kg (期待値 7.85)"))
+  (if (< (abs (- actual 7.85)) 1e-9)
+    (princ " [OK]")
+    (princ " [NG]"))
+  (princ))
+
+(defun c:BWGTC (/ ss i ent ed txt cols records rec path fp count total-w total-q w row)
+  (setq ss (ssget "X" '((8 . "BWGT") (0 . "TEXT"))))
+  (if (null ss)
+    (princ "\nBWGT記録がありません。")
+    (progn
+      ; レコード収集
+      (setq records '() i 0)
+      (while (< i (sslength ss))
+        (setq ent (ssname ss i))
+        (setq ed (entget ent))
+        (setq txt (bwgt:csv-text (cdr (assoc 1 ed))))
+        (if txt
+          (progn
+            (setq cols (bwgt:split txt ","))
+            (if (bwgt:valid-csv-cols cols)
+              (setq records
+                (cons (list (atoi (nth 1 cols)) cols) records)))))
+        (setq i (1+ i)))
+      ; ID 降順ソート
+      (setq records
+        (vl-sort records '(lambda (a b) (> (car a) (car b)))))
+      ; 保存先
+      (setq path
+        (getfiled "CSV保存先"
+          (strcat (getvar "DWGPREFIX")
+                  (vl-filename-base (getvar "DWGNAME")) "_bwgt.csv")
+          "csv" 1))
+      (if (null path)
+        (princ "\nキャンセルされました。")
+        (progn
+          (setq fp (open path "w"))
+          ; タイトル（図面ファイル名）
+          (write-line (strcat (chr 239) (chr 187) (chr 191) (getvar "DWGNAME")) fp)
+          ; Header (English)
+          (write-line "ID,DENSITY_t_m3,THICKNESS_mm,WEIGHT_kg,QTY,TOTAL_kg" fp)
+          (setq count 0 total-w 0.0 total-q 0 row 3)
+          (foreach rec records
+            (setq cols (cadr rec))
+            (setq w (atof (nth 5 cols)))
+            (write-line
+              (strcat
+                (nth 1 cols) ","                 ; ID
+                (nth 4 cols) ","                 ; 密度
+                (nth 3 cols) ","                 ; 板厚
+                (nth 5 cols) ","                 ; 重量
+                "1,"                              ; 数量(編集可)
+                "=D" (itoa row) "*E" (itoa row)) ; 合計重量(式)
+              fp)
+            (setq total-w (+ total-w w))
+            (setq total-q (1+ total-q))
+            (setq row (1+ row))
+            (setq count (1+ count)))
+          ; 合計行
+          (write-line
+            (strcat "TOTAL,,,,=SUM(E3:E" (itoa (1- row)) "),=SUM(F3:F" (itoa (1- row)) ")")
+            fp)
+          (close fp)
+          (princ (strcat "\nCSV出力: " (itoa count)
+            " 件 -> " path))))))
+  (princ))
 
 
 ; -------------------------------------------------------------------------
