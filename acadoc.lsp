@@ -657,7 +657,8 @@
 ;     1点目を指定→2点目を指定→距離から水平/垂直を自動判定
 ;     十分に長い線を両方向に引く
 ;     実行前のロック状態を記憶して復帰
-(defun c:Z (/ prev pt1 pt2 dx dy large laydata islocked)
+;     非表示なら自動表示
+(defun c:Z (/ prev pt1 pt2 dx dy large laydata islocked islayer_off)
   ; HJ画層がなければ作成（色=251暗めグレー、線種=DASHED2）
   (if (not (tblsearch "LAYER" "HJ"))
     (progn
@@ -674,7 +675,19 @@
   (setq laydata (tblsearch "LAYER" "HJ"))
   (setq islocked (= (logand (cdr (assoc 70 laydata)) 4) 4))
   
+  ; HJ画層の非表示状態をチェック（ビット1がOFF/非表示）
+  (setq islayer_off (= (logand (cdr (assoc 70 laydata)) 2) 0))
+  
+  ; 非表示なら表示ON
+  (if islayer_off
+    (progn
+      (command "._LAYER" "_ON" "HJ" "")
+      (command nil)  ; コマンド終了
+    )
+  )
+  
   (command "._LAYER" "_U" "HJ" "")
+  (command nil)  ; コマンド終了
   (setq prev (getvar "CLAYER"))
   (setvar "CLAYER" "HJ")
   
@@ -706,7 +719,10 @@
   (setvar "CLAYER" prev)
   ; 元のロック状態に復帰
   (if islocked
-    (command "._LAYER" "_LO" "HJ" "")
+    (progn
+      (command "._LAYER" "_LO" "HJ" "")
+      (command nil)  ; コマンド終了
+    )
   )
   (princ)
 )
@@ -784,7 +800,15 @@
 
 ; ZZ - 補助線非表示
 (defun c:ZZ ()
+  ; 現在の画層を記憶
+  (setq prev (getvar "CLAYER"))
+  ; デフォルト画層に切り替え（確認プロンプト回避）
+  (setvar "CLAYER" "0")
+  ; LAYER _OFF を実行
   (command "._LAYER" "_OFF" "HJ" "")
+  (command nil)  ; コマンド終了
+  ; 元の画層に戻す
+  (setvar "CLAYER" prev)
   (command "._REGEN")
   (princ)
 )
@@ -792,30 +816,35 @@
 ; ZF - 補助線フリーズ
 (defun c:ZF ()
   (command "._LAYER" "_F" "HJ" "")
+  (command nil)  ; コマンド終了
   (princ)
 )
 
 ; ZFF - 補助線フリーズ解除
 (defun c:ZFF ()
   (command "._LAYER" "_T" "HJ" "")
+  (command nil)  ; コマンド終了
   (princ)
 )
 
 ; ZR - 補助線ロック（編集禁止）
 (defun c:ZR ()
   (command "._LAYER" "_LO" "HJ" "")
+  (command nil)  ; コマンド終了
   (princ)
 )
 
 ; ZRR - 補助線ロック解除
 (defun c:ZRR ()
   (command "._LAYER" "_U" "HJ" "")
+  (command nil)  ; コマンド終了
   (princ)
 )
 
 ; ZN - 補助線ノープロット設定（印刷前に実行）
 (defun c:ZN ()
   (command "._LAYER" "_P" "_N" "HJ" "")
+  (command nil)  ; コマンド終了
   (princ "\nHJ画層をノープロットに設定。印刷後にZNNで元に戻します。")
   (princ)
 )
@@ -823,9 +852,11 @@
 ; ZNN - 補助線ノープロット解除（印刷後に実行）
 (defun c:ZNN ()
   (command "._LAYER" "_P" "_P" "HJ" "")
+  (command nil)  ; コマンド終了
   (princ "\nHJ画層を印刷設定に戻しました。")
   (princ)
 )
+
 
 ;; ============================================================
 ;; PARTIAL-OFFSET.LSP  v6
